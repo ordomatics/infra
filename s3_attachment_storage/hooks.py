@@ -58,6 +58,26 @@ def run_bootstrap(env):
         env["fs.storage"].sudo().create(vals)
         _logger.info("s3_attachment_storage: created S3 attachment storage (bucket=%s)", bucket)
 
+    # Some attachments (e.g. menu icons, language flags) are written by
+    # Odoo's own XML data loader through a path that bypasses fs_attachment's
+    # create() override, landing on local disk even with S3 active. Move
+    # just those. Deliberately narrower than ir.attachment.force_storage():
+    # that also sweeps up db_datas-stored attachments (small images/JS/CSS,
+    # intentionally kept in Postgres per force_db_for_default_attachment_rules),
+    # which would defeat the point of that setting.
+    Attachment = env["ir.attachment"].sudo()
+    stray = Attachment.search([
+        ("store_fname", "!=", False),
+        ("store_fname", "not like", "s3://%"),
+        # ir.attachment's own _search() silently adds res_field=False to
+        # any domain that doesn't mention res_field — without this, field
+        # attachments (menu icons, language flags: exactly what needs
+        # catching here) would be excluded.
+        "|", ("res_field", "=", False), ("res_field", "!=", False),
+    ])
+    for att in stray:
+        att._move_attachment_to_store()
+
 
 def post_init_hook(env):
     run_bootstrap(env)
