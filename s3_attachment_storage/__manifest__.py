@@ -1,6 +1,6 @@
 {
     "name": "S3 Attachment Storage Bootstrap",
-    "version": "1.1.0",
+    "version": "1.0.0",
     "category": "Technical",
     "summary": "Configures fs_attachment_s3 as the default attachment storage from AWS_* env vars",
     "description": """
