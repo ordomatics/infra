@@ -29,7 +29,12 @@ def run_bootstrap(env):
             "region_name": "$AWS_REGION",
         },
     })
-    force_db_rules_json = '{"image/": 51200, "application/javascript": 0, "text/css": 0}'
+    # Deployments override which mimetypes stay in Postgres; the default keeps
+    # small images and web assets out of S3 so page loads don't round-trip.
+    force_db_rules_json = (
+        os.environ.get("FS_FORCE_DB_RULES", "").strip()
+        or '{"image/": 51200, "application/javascript": 0, "text/css": 0}'
+    )
 
     vals = {
         "name": "DigitalOcean Spaces",
