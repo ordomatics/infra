@@ -42,6 +42,9 @@ class TestDbInitGuard(BaseCase):
         # What a wildcard deployment routes by: the host's first label.
         self.startPatcher(patch.dict(odoo.tools.config.options, {'dbfilter': '^%d$'}))
         self._mark('NULL')
+        with closing(odoo.sql_db.db_connect(self.name).cursor()) as cr:
+            cr._cnx.autocommit = True
+            cr.execute('DROP TABLE IF EXISTS ir_module_module')
         guard._initialised.pop(self.name, None)
 
     def _host(self):
@@ -79,6 +82,19 @@ class TestDbInitGuard(BaseCase):
 
         self.assertIn(self.name, service_db.list_dbs(True))
         self.assertEqual(http.db_filter([self.name], host=self._host()), [self.name])
+
+    def test_a_database_being_upgraded_is_hidden_too(self):
+        self._initialise()
+        self._mark("'odoo:upgrading'")
+
+        self.assertNotIn(self.name, service_db.list_dbs(True))
+
+    def test_a_sync_mark_does_not_hide_it(self):
+        # Out of sync or failed stays served: its errors are the owner's call.
+        self._initialise()
+        for mark in ("'odoo:synced:prod-abc'", "'odoo:upgrade-failed:prod-abc'"):
+            self._mark(mark)
+            self.assertIn(self.name, service_db.list_dbs(True))
 
     def test_another_comment_does_not_hide_it(self):
         self._initialise()

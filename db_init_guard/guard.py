@@ -4,8 +4,11 @@ from contextlib import closing
 
 _logger = logging.getLogger(__name__)
 
-# Set and cleared by the platform's init job (COMMENT ON DATABASE).
+# Set and cleared by the platform's init and upgrade jobs (COMMENT ON
+# DATABASE). Other marks on a database, odoo:synced:<tag> and
+# odoo:upgrade-failed:<tag>, only record its sync state and hide nothing.
 MARKER = "odoo:initialising"
+MARKERS = (MARKER, "odoo:upgrading")
 _TTL = 5.0
 # Longer for a yes: an initialised database stays so, except when deleted and
 # recreated under the same name, which this still catches within a minute.
@@ -26,7 +29,7 @@ def initialising_dbs():
         with closing(odoo.sql_db.db_connect("postgres").cursor()) as cr:
             cr.execute(
                 "SELECT datname FROM pg_database "
-                "WHERE shobj_description(oid, 'pg_database') = %s", (MARKER,))
+                "WHERE shobj_description(oid, 'pg_database') = ANY(%s)", (list(MARKERS),))
             names = frozenset(name for (name,) in cr.fetchall())
     except Exception as exc:
         _logger.warning("db_init_guard: cannot read database markers: %s", exc)
@@ -86,4 +89,5 @@ def patch_database_listing():
 
     service_db.list_dbs = guarded_list_dbs
     http.db_filter = guarded_db_filter
-    _logger.info("db_init_guard: databases marked %r or not yet initialised are hidden", MARKER)
+    _logger.info("db_init_guard: databases marked %s or not yet initialised are hidden",
+                 " or ".join(MARKERS))
