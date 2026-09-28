@@ -26,6 +26,8 @@ class TestDbInitGuard(BaseCase):
 
     @classmethod
     def tearDownClass(cls):
+        # The guard's own check leaves pooled connections to it open.
+        odoo.sql_db.close_db(cls.name)
         cls._sql('DROP DATABASE IF EXISTS "%s"' % cls.name)
         super().tearDownClass()
 
@@ -39,6 +41,8 @@ class TestDbInitGuard(BaseCase):
         super().setUp()
         # What a wildcard deployment routes by: the host's first label.
         self.startPatcher(patch.dict(odoo.tools.config.options, {'dbfilter': '^%d$'}))
+        self._mark('NULL')
+        guard._initialised.pop(self.name, None)
 
     def _host(self):
         # First label = database, which is what a %d dbfilter matches.
@@ -48,6 +52,20 @@ class TestDbInitGuard(BaseCase):
         self._sql('COMMENT ON DATABASE "%s" IS %s' % (self.name, value))
         guard._cache['at'] = float('-inf')
 
+    def _initialise(self):
+        # is_initialized looks for exactly this table.
+        with closing(odoo.sql_db.db_connect(self.name).cursor()) as cr:
+            cr._cnx.autocommit = True
+            cr.execute('CREATE TABLE IF NOT EXISTS ir_module_module (id int)')
+        guard._initialised.pop(self.name, None)
+
+    def test_an_empty_database_is_hidden_until_it_has_a_schema(self):
+        self.assertNotIn(self.name, service_db.list_dbs(True))
+
+        self._initialise()
+
+        self.assertIn(self.name, service_db.list_dbs(True))
+
     def test_a_marked_database_is_neither_listed_nor_routed(self):
         self._mark("'%s'" % guard.MARKER)
 
@@ -55,6 +73,7 @@ class TestDbInitGuard(BaseCase):
         self.assertEqual(http.db_filter([self.name], host=self._host()), [])
 
     def test_clearing_the_mark_brings_it_back(self):
+        self._initialise()
         self._mark("'%s'" % guard.MARKER)
         self._mark('NULL')
 
@@ -62,6 +81,7 @@ class TestDbInitGuard(BaseCase):
         self.assertEqual(http.db_filter([self.name], host=self._host()), [self.name])
 
     def test_another_comment_does_not_hide_it(self):
+        self._initialise()
         self._mark("'our demo'")
 
         self.assertIn(self.name, service_db.list_dbs(True))
