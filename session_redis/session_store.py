@@ -34,55 +34,55 @@ def _resp_encode(*args):
     return buf
 
 
-def _resp_decode(data: bytes):
-    if not data:
-        return None
-    t = chr(data[0])
-    nl = data.index(b"\r\n")
-    line = data[1:nl].decode()
-    if t == "+":
-        return line
-    if t == "-":
-        raise RuntimeError(f"Redis error: {line}")
-    if t == ":":
-        return int(line)
-    if t == "$":
-        size = int(line)
-        if size == -1:
-            return None
-        start = nl + 2
-        return data[start: start + size]
-    return None
+def _read_reply(f):
+    line = f.readline()
+    if not line.endswith(b"\r\n"):
+        raise ConnectionError("truncated Redis reply")
+    kind, rest = line[:1], line[1:-2]
+    if kind == b"+":
+        return rest.decode()
+    if kind == b"-":
+        raise RuntimeError(f"Redis error: {rest.decode()}")
+    if kind == b":":
+        return int(rest)
+    if kind == b"$":
+        size = int(rest)
+        return None if size == -1 else f.read(size + 2)[:-2]
+    if kind == b"*":
+        size = int(rest)
+        return None if size == -1 else [_read_reply(f) for _ in range(size)]
+    raise RuntimeError(f"Unknown Redis reply type {kind!r}")
+
+
+def _command(*args):
+    """Execute one Redis command via a fresh socket. Raises on failure."""
+    conn = _socket.create_connection((_REDIS_HOST, _REDIS_PORT), timeout=3)
+    try:
+        conn.sendall(_resp_encode(*args))
+        with conn.makefile("rb") as f:
+            return _read_reply(f)
+    finally:
+        conn.close()
 
 
 def _redis(*args):
-    """Execute one Redis command via a fresh socket; returns decoded value or None on error."""
+    """Like _command, but a failure is logged and reads as None."""
     try:
-        conn = _socket.create_connection((_REDIS_HOST, _REDIS_PORT), timeout=3)
-        try:
-            conn.sendall(_resp_encode(*args))
-            buf = b""
-            while True:
-                chunk = conn.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
-                t = chr(buf[0])
-                if t in ("+", "-", ":") and b"\r\n" in buf:
-                    break
-                if t == "$":
-                    nl = buf.index(b"\r\n")
-                    size = int(buf[1:nl])
-                    if size == -1 or len(buf) >= nl + 2 + size + 2:
-                        break
-                else:
-                    break
-            return _resp_decode(buf)
-        finally:
-            conn.close()
+        return _command(*args)
     except Exception as exc:
         _logger.warning("session_redis: Redis %s failed: %s", args[0], exc)
         return None
+
+
+def _scan(pattern):
+    """Every key matching pattern. Raises on failure: a partial listing must
+    never pass for a complete one."""
+    keys, cursor = [], b"0"
+    while True:
+        cursor, batch = _command("SCAN", cursor, "MATCH", pattern, "COUNT", "1000")
+        keys.extend(batch)
+        if cursor == b"0":
+            return keys
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,8 @@ class RedisSessionStore:
 
     Implements the interface Odoo expects:
         get(sid), save(session), delete(session), new(),
-        rotate(session, env), generate_key(), is_valid_key(key), vacuum()
+        rotate(session, env), generate_key(), is_valid_key(key), vacuum(),
+        get_missing_session_identifiers(ids), delete_from_identifiers(ids)
     """
 
     def __init__(self, session_class, renew_missing=True):
@@ -150,6 +151,31 @@ class RedisSessionStore:
 
     def vacuum(self, max_lifetime=None):
         pass  # Redis TTL handles expiry — nothing to sweep
+
+    # -- device log (res.device) --------------------------------------------
+    # An identifier is the first 42 chars of a sid, as res.device.log stores it.
+
+    def get_missing_session_identifiers(self, identifiers):
+        """The identifiers with no live session. Nothing when Redis cannot be
+        read: the caller revokes whatever this returns."""
+        try:
+            keys = _scan(_KEY_PREFIX + "*")
+        except Exception as exc:
+            _logger.warning("session_redis: cannot list sessions: %s", exc)
+            return set()
+        present = {k.decode()[len(_KEY_PREFIX):][:42] for k in keys}
+        return set(identifiers) - present
+
+    def delete_from_identifiers(self, identifiers):
+        """Logs out a device: drops every session its identifier prefixes."""
+        from odoo.http import _session_identifier_re
+        for identifier in identifiers:
+            # Also keeps glob characters out of the SCAN pattern.
+            if not _session_identifier_re.match(identifier):
+                continue
+            keys = _scan(_KEY_PREFIX + identifier + "*")
+            if keys:
+                _command("DEL", *keys)
 
 
 # ---------------------------------------------------------------------------
